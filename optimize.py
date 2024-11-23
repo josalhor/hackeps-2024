@@ -241,6 +241,14 @@ class SpatialGraph:
                 min_line = closest_line
 
         return min_point, network_name, min_line
+    
+    def find_closest_point_in_network(self, point, network):
+        """Find the closest point in the network to the given point."""
+        candidates = self.points_by_network[network]
+        closest_point = candidates.loc[
+            candidates.distance(point).idxmin()
+        ]
+        return closest_point.geom
 
     def find_neighbours(self, neighbour:Neighbour, last_point):
         """Find the neighbours of a point in a multilinestring and across networks."""
@@ -253,12 +261,19 @@ class SpatialGraph:
         index_point = coords.index(point)
         
         neighbours = []
+        jump_to = set()
         # We will do two loops, one backwards and one forwards
         def evaluate_neighbour(i, reach, acc_distance):
             for network_name in self.networks:
                 if network_name == network:
                     continue
+                if network_name in jump_to:
+                    continue
                 # Find the closest line in the other network
+                closest_jump = self.find_closest_point_in_network(coords[i], network_name)
+                distance_jump = closest_jump.distance(coords[i])
+                if distance_jump > 500:
+                    continue
                 closest_line, distance_line = self.find_closest_line(coords[i], network_name)
                 if distance_line > 500:
                     continue
@@ -268,6 +283,8 @@ class SpatialGraph:
                     # We can add this point
                     new_neighbour = Neighbour(closest_point, reach, network_name, closest_line, neighbour.real_distance + acc_distance, haversine_distance(closest_point, last_point))
                     neighbours.append(new_neighbour)
+                    jump_to.add(network_name)
+                
 
         reach = []
         acc_distance = 0
@@ -280,8 +297,8 @@ class SpatialGraph:
             for close_line in self.find_closest_lines(coords[0], network, 500).geom:
                 closest_point = self.find_closest_point_line(coords[0], close_line)
                 distance = closest_point.distance(coords[0])
-                if distance <= 500:
-                    new_neighbour = Neighbour(closest_point, reach, network, close_line, neighbour.real_distance + distance, haversine_distance(closest_point, last_point))
+                if distance <= 500 and closest_point != coords[0]:
+                    new_neighbour = Neighbour(closest_point, reach, network, close_line, neighbour.real_distance + acc_distance, haversine_distance(closest_point, last_point))
                     neighbours.append(new_neighbour)
 
         reach = []
@@ -295,8 +312,8 @@ class SpatialGraph:
             for close_line in self.find_closest_lines(coords[-1], network, 500).geom:
                 closest_point = self.find_closest_point_line(coords[-1], close_line)
                 distance = closest_point.distance(coords[-1])
-                if distance <= 500:
-                    new_neighbour = Neighbour(closest_point, reach, network, close_line, neighbour.real_distance + distance, haversine_distance(closest_point, last_point))
+                if distance <= 500 and closest_point != coords[-1]:
+                    new_neighbour = Neighbour(closest_point, reach, network, close_line, neighbour.real_distance + acc_distance, haversine_distance(closest_point, last_point))
                     neighbours.append(new_neighbour)
 
         return neighbours
@@ -385,9 +402,9 @@ def a_star_search(start, end, spatial_graph:SpatialGraph, search_radius_network,
         # Check if we reached the goal
         if haversine_distance(neighbor.point, real_end) <= search_radius_network:
             print("Goal reached!")
-            path = reconstruct_path(came_from, neighbor.point)
+            path = reconstruct_path(came_from, neighbor)
             path.extend([real_end, end])  # Append the final points
-            total_distance = g_cost[real_end] + haversine_distance(real_end, end)
+            total_distance = haversine_distance(start, real_start) + neighbor.real_distance + haversine_distance(real_end, end)
             return path, total_distance
         
         # Get candidates
@@ -421,12 +438,16 @@ def a_star_search(start, end, spatial_graph:SpatialGraph, search_radius_network,
     return None, total_distance
 
 
-def reconstruct_path(came_from, current_point):
+def reconstruct_path(came_from, neighbor:Neighbour):
     """Reconstruct the path from came_from mapping."""
-    path = [current_point]
-    while current_point in came_from:
-        current_point = came_from[current_point]
-        path.append(current_point)
+    path = [neighbor.point]
+    for c in neighbor.reach_path[::-1]:
+        path.append(c)
+    while neighbor.point in came_from:
+        neighbor = came_from[neighbor.point]
+        path.append(neighbor.point)
+        for c in neighbor.reach_path[::-1]:
+            path.append(c)
     path.reverse()
     return path
 

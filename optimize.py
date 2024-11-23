@@ -190,7 +190,7 @@ def haversine_distance(point1, point2):
     return point1.distance(point2)
 
 
-def get_adjacent_points_and_lines(point, points_by_network, red_lines, current_red, search_radius_network, increase_radius_network, search_radius_other_networks):
+def get_adjacent_points_and_lines(point, endpoint, points_by_network, red_lines, current_red, search_radius_network, increase_radius_network, search_radius_other_networks):
     """
     Find all candidates within the search radius, including:
     - Points from the same or other networks within the radius.
@@ -200,19 +200,25 @@ def get_adjacent_points_and_lines(point, points_by_network, red_lines, current_r
     # Find points in other networks within the radius
     # nearby_points = red_points[red_points.distance(point) <= radius]
     points_current_network = pd.DataFrame()
+    heuristic_current_point = haversine_distance(point, endpoint)
     while points_current_network.empty:
         points_current_network = points_by_network[current_red][points_by_network[current_red].distance(point) <= search_radius_network].copy()
         search_radius_network += increase_radius_network
     points_current_network['network'] = current_red
 
+    # Filter those with a heuristic less than the current point
+    points_current_network = points_current_network[points_current_network['geom'].apply(lambda pt: haversine_distance(pt, endpoint) < heuristic_current_point)]
+
     all_points = points_current_network
 
     # Find points in other networks within the radius
-    for network_name, network in points_by_network.items():
-        if network_name != current_red:
-            nearby_points = network[network.distance(point) <= search_radius_other_networks].copy()
-            nearby_points['network'] = network_name
-            all_points = pd.concat([all_points, nearby_points])
+    while all_points.empty:
+        for network_name, network in points_by_network.items():
+            if network_name != current_red:
+                nearby_points = network[network.distance(point) <= search_radius_other_networks].copy()
+                nearby_points['network'] = network_name
+                all_points = pd.concat([all_points, nearby_points])
+        search_radius_other_networks += increase_radius_network
     
     return all_points
     # Find adjacent points along the same red
@@ -273,9 +279,10 @@ def best_first_search(start, end, points_by_network, networks, search_radius_net
     real_end, end_network = find_closest_to_network(end, points_by_network)
     print('Closest start points found:', start, real_start, 'Distance:', haversine_distance(start, real_start))
     print('Closest end points found:', end, real_end, 'Distance:', haversine_distance(end, real_end))
-    visited.append(real_start)
+    visited.append(start)
     current_point = real_start
     current_red = start_network
+    total_distance += haversine_distance(start, real_start)
     
     print('Starting search on network:', current_red)
     while haversine_distance(current_point, real_end) > search_radius_network:
@@ -284,6 +291,7 @@ def best_first_search(start, end, points_by_network, networks, search_radius_net
         # Get all candidates (nearby points and adjacent points in the same network)
         candidates = get_adjacent_points_and_lines(
             current_point,
+            real_end,
             points_by_network,
             networks,
             current_red,
@@ -300,7 +308,9 @@ def best_first_search(start, end, points_by_network, networks, search_radius_net
         )
         
         # Choose the best candidate based on heuristic
-        best_candidate = candidates.sort_values("heuristic").iloc[0].geom
+        best_candidate = candidates.sort_values("heuristic").iloc[0]
+        current_red = best_candidate.network
+        best_candidate = best_candidate.geom
         
         # Update total distance
         total_distance += haversine_distance(current_point, best_candidate)

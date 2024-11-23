@@ -2,11 +2,13 @@ import geopandas as gpd
 import pandas as pd
 import random
 from shapely.geometry import Point, MultiLineString, Point
+from shapely.ops import nearest_points
 from sqlalchemy import create_engine
 from geopy.distance import geodesic
 from sqlalchemy import inspect
 from geoalchemy2 import Geometry
 from sqlalchemy.sql import text
+import heapq
 
 # Database connection parameters
 DB_USER = "user"
@@ -265,37 +267,55 @@ def find_closest_to_network(point, points_by_network):
     # print(f"Closest point found: {closest_point}")
     return closest_point.geom, closest_point.network
 
-def best_first_search(start, end, points_by_network, networks, search_radius_network, increase_radius_network, search_radius_other_networks):
-    """Perform Best-First Search."""
+
+def a_star_search(start, end, points_by_network, networks, search_radius_network, increase_radius_network, search_radius_other_networks):
+    """Perform A* Search."""
     visited = []
     total_distance = 0  # Track total distance
-    current_red = None  # Track current red network
-    print('Start algorithm')
+    print('Start A* algorithm')
 
-    # For the first and last point, we need to find the closest point in the network
-    # Since it is not guaranteed to be in the network
-    # To do this, we will increment the search radius until we find a point
+    # Initialize priority queue
+    priority_queue = []
+    heapq.heapify(priority_queue)
+    
+    # Find the closest points in the network for start and end
     print('Finding closest points in the network...')
     real_start, start_network = find_closest_to_network(start, points_by_network)
     real_end, end_network = find_closest_to_network(end, points_by_network)
     print('Closest start points found:', start, real_start, 'Distance:', haversine_distance(start, real_start))
     print('Closest end points found:', end, real_end, 'Distance:', haversine_distance(end, real_end))
-    visited.append(start)
-    current_point = real_start
-    current_red = start_network
-    total_distance += haversine_distance(start, real_start)
     
-    print('Starting search on network:', current_red)
-    while haversine_distance(current_point, real_end) > search_radius_network:
+    # Initialize the search
+    g_cost = {real_start: 0}  # Cost from start to the current node
+    f_cost = {real_start: haversine_distance(real_start, real_end)}  # Total cost (g + h)
+    heapq.heappush(priority_queue, (f_cost[real_start], real_start, start_network))  # (priority, point, network)
+    came_from = {}  # Track the path
+    
+    print('Starting search on network:', start_network)
+    while priority_queue:
+        # Get the point with the smallest f_cost
+        _, current_point, current_network = heapq.heappop(priority_queue)
+        current_point = current_point  # Ensure it's hashable
+        
+        if current_point in visited:
+            continue
         visited.append(current_point)
         
-        # Get all candidates (nearby points and adjacent points in the same network)
+        # Check if we reached the goal
+        if haversine_distance(current_point, real_end) <= search_radius_network:
+            print("Goal reached!")
+            path = reconstruct_path(came_from, current_point)
+            path.extend([real_end, end])  # Append the final points
+            total_distance = g_cost[real_end] + haversine_distance(real_end, end)
+            return path, total_distance
+        
+        # Get candidates
         candidates = get_adjacent_points_and_lines(
             current_point,
             real_end,
             points_by_network,
             networks,
-            current_red,
+            current_network,
             search_radius_network, increase_radius_network, search_radius_other_networks
         )
         
@@ -303,27 +323,36 @@ def best_first_search(start, end, points_by_network, networks, search_radius_net
             print("No path found!")
             return visited, total_distance
         
-        # Calculate heuristic for each candidate
-        candidates["heuristic"] = candidates["geom"].apply(
-            lambda pt: haversine_distance(pt, end)
-        )
-        
-        # Choose the best candidate based on heuristic
-        best_candidate = candidates.sort_values("heuristic").iloc[0]
-        current_red = best_candidate.network
-        best_candidate = best_candidate.geom
-        
-        # Update total distance
-        total_distance += haversine_distance(current_point, best_candidate)
-        current_point = best_candidate
+        # Process each candidate
+        for _, row in candidates.iterrows():
+            neighbor = row.geom
+            network = row.network
+            tentative_g_cost = g_cost[current_point] + haversine_distance(current_point, neighbor)
+            
+            # If the neighbor is already evaluated with a lower cost, skip it
+            if neighbor in g_cost and tentative_g_cost >= g_cost[neighbor]:
+                continue
+            
+            # Update path and costs
+            came_from[neighbor] = current_point
+            g_cost[neighbor] = tentative_g_cost
+            f_cost[neighbor] = tentative_g_cost + haversine_distance(neighbor, real_end)
+            
+            # Push to priority queue
+            heapq.heappush(priority_queue, (f_cost[neighbor], neighbor, network))
     
-    # Add the end point to the path
-    visited.append(real_end)
-    visited.append(end)
-    total_distance += haversine_distance(current_point, end)
-    
-    print("Path found!")
+    print("No path found!")
     return visited, total_distance
+
+
+def reconstruct_path(came_from, current_point):
+    """Reconstruct the path from came_from mapping."""
+    path = [current_point]
+    while current_point in came_from:
+        current_point = came_from[current_point]
+        path.append(current_point)
+    path.reverse()
+    return path
 
 def print_reslts_table(engine):
     query = text("""
@@ -348,7 +377,7 @@ if __name__ == "__main__":
     print("End point:", end_point)
     # ensure_results_table_exists(engine)
     # Run Best-First Search
-    path, total_distance = best_first_search(
+    path, total_distance = a_star_search(
         start_point.geom, end_point.geom,
         points_by_network, networks,
         search_radius_network, increase_radius_network, search_radius_other_networks

@@ -3,6 +3,7 @@ import pandas as pd
 import random
 from shapely.geometry import Point, MultiLineString, Point
 from shapely.ops import nearest_points
+from shapely import get_coordinates
 from sqlalchemy import create_engine
 from geopy.distance import geodesic
 from sqlalchemy import inspect
@@ -59,6 +60,7 @@ final = convert_to_25830(final)
 def convert_multipoint_to_point(mp):
     """Convert a MultiPoint to a Point."""
     return mp.geoms[0]
+
 red3_puntos["geom"] = red3_puntos["geom"].apply(convert_multipoint_to_point)
 
 def create_multilinestring_from_points(visited_points):
@@ -170,6 +172,120 @@ networks = {
     "red3": red3
 }
 
+class Neighbour:
+    def __init__(self, points, network, line, index_point, real_distance, heuristic_distance):
+        self.points = points
+        self.network = network
+        self.index_point = index_point
+        self.line = line
+        self.real_distance = real_distance
+        self.heuristic_distance = heuristic_distance
+    
+    def get_last_point(self):
+        return self.points[-1]
+
+class SpatialGraph:
+    def __init__(self, networks, points_by_network):
+        self.networks = networks
+        self.points_by_network = points_by_network
+
+    def find_closest_line(self, point, network):
+        """Find the closest multilinestring in the specified network to the given point."""
+        multilines = self.networks[network]
+        distances = multilines.distance(point)
+        closest_index = distances.idxmin()
+        return multilines.loc[closest_index]
+
+    def get_coordinates(self, multiline):
+        """Get the coordinates of a multilinestring."""
+        return [
+            Point(coord)
+            for coords in multiline.geom.geoms
+            for coord in get_coordinates(coords)
+        ]
+
+    def find_closest_point_line(self, point, multiline):
+        """Find the closest start/end point of the multilinestring to the given point."""
+        points = self.get_coordinates(multiline)
+        distances = [point.distance(pt) for pt in points]
+        closest_index = distances.index(min(distances))
+        return points[closest_index], closest_index
+    
+    def find_closest_point_not_in_network(self, point):
+        """ Find the closest point in the network to the given point. """
+        min_distance = None
+        min_point = None
+        min_line = None
+        min_index = None
+        for network_name, network in self.points_by_network.items():
+            # We will use find_closest_line and find_closest_point_line
+            closest_line = self.find_closest_line(point, network_name)
+            closest_point, index = self.find_closest_point_line(point, closest_line)
+            distance = closest_point.distance(point)
+            if min_distance is None or distance < min_distance:
+                min_distance = distance
+                min_point = closest_point
+                min_line = closest_line
+                min_index = index
+
+        return min_point, network_name, min_line, min_index
+
+    def find_neighbours(self, neighbour:Neighbour, last_point):
+        """Find the neighbours of a point in a multilinestring and across networks."""
+        multiline = neighbour.line
+        index = neighbour.index_point
+        network = neighbour.network
+        point = neighbour.get_last_point()
+        
+        neighbours = []
+
+        # 1. Previous and next points in the multilinestring
+        coords = self.get_coordinates(multiline)
+        if index > 0:
+            p = coords[index - 1]
+            neighbour = Neighbour([p], network, multiline, index - 1, neighbour.real_distance + haversine_distance(neighbour.get_last_point(), p), haversine_distance(p, last_point))
+            neighbours.append(neighbour)
+        if index < len(coords) - 1:
+            p = coords[index + 1]
+            neighbour = Neighbour([p], network, multiline, index + 1, neighbour.real_distance + haversine_distance(neighbour.get_last_point(), p), haversine_distance(p, last_point))
+            neighbours.append(neighbour)
+        # if index == 0 or index == len(coords) - 1:
+        #     # We can jump to other lines in the same network
+        #     for other_line in self.networks[network].itertuples():
+                
+
+        # 2. Spatially close point from the current network's points
+        current_points = self.points_by_network[network]
+        distances = current_points.distance(point)
+        closest_point = current_points.loc[distances.idxmin()]
+        if distances.min() < 50:  # Adjust tolerance if needed
+            point1 = closest_point
+
+            # 3. Closest point in other networks
+            for other_network, points in self.points_by_network.items():
+                if other_network == network:
+                    continue
+                distances = points.distance(point1)
+                closest_point2 = points.loc[distances.idxmin()]
+                if distances.min() <= 1000:
+                    point2 = closest_point2
+
+                    # 4. Closest line segment in the other network
+                    line = self.find_closest_line(point2, other_network)
+
+                    # 5. Closest point on the found line
+                    point3, index = self.find_closest_point_line(point2, other_network, line)
+
+                    # Add the option [point1, point2, point3]
+                    neighbour = Neighbour(
+                        [point1, point2, point3], other_network, line, index, 
+                        neighbour.real_distance + haversine_distance(neighbour.get_last_point(), point1) + haversine_distance(point1, point2) + haversine_distance(point2, point3),
+                        haversine_distance(point3, last_point)
+                    )
+                    neighbours.append(neighbour)
+
+        return neighbours
+
 # Select random start and end points
 start_point = inicio.sample(1, random_state=42).iloc[0]
 end_point = final.sample(1, random_state=42).iloc[0]
@@ -192,58 +308,6 @@ def haversine_distance(point1, point2):
     """Calculate the haversine distance (meters) between two points."""
     return point1.distance(point2)
 
-
-def get_adjacent_points_and_lines(point, endpoint, points_by_network, red_lines, current_red, search_radius_network, increase_radius_network, search_radius_other_networks):
-    """
-    Find all candidates within the search radius, including:
-    - Points from the same or other networks within the radius.
-    - Adjacent points in the same network.
-    """
-    print(f"Finding adjacent points for {point}")
-    # Find points in other networks within the radius
-    # nearby_points = red_points[red_points.distance(point) <= radius]
-    points_current_network = pd.DataFrame()
-    heuristic_current_point = haversine_distance(point, endpoint)
-    while points_current_network.empty and search_radius_network <= max_search_radius:
-        points_current_network = points_by_network[current_red][points_by_network[current_red].distance(point) <= search_radius_network].copy()
-        search_radius_network += increase_radius_network
-        points_current_network = points_current_network[points_current_network['geom'].apply(lambda pt: haversine_distance(pt, endpoint) < heuristic_current_point)]
-    points_current_network['network'] = current_red
-
-    # Filter those with a heuristic less than the current point
-
-    all_points = points_current_network
-
-    # Find points in other networks within the radius
-    while all_points.empty:
-        for network_name, network in points_by_network.items():
-            if network_name != current_red:
-                nearby_points = network[network.distance(point) <= search_radius_other_networks].copy()
-                nearby_points['network'] = network_name
-                all_points = pd.concat([all_points, nearby_points])
-        search_radius_other_networks += increase_radius_network
-    
-    return all_points
-    # Find adjacent points along the same red
-    # adjacent_points = []
-    # for line in red_lines[current_red].itertuples():
-    #     if line.geom.distance(point) <= radius:
-    #         # Extract points (start and end) of the line segment
-    #         coords = list(line.geom.coords)
-    #         for i, coord in enumerate(coords):
-    #             candidate = Point(coord)
-    #             if point.distance(candidate) <= radius:
-    #                 adjacent_points.append(candidate)
-    #             # Add next or previous points in the sequence
-    #             if i > 0:
-    #                 adjacent_points.append(Point(coords[i - 1]))
-    #             if i < len(coords) - 1:
-    #                 adjacent_points.append(Point(coords[i + 1]))
-    
-    # Combine and return unique points
-    # return gpd.GeoDataFrame(
-    #     geometry=list(set(nearby_points["geom"].tolist() + adjacent_points))
-    # )
 
 def get_adjacent_points(point, red_points, radius):
     """ Find all candidates within the search radius. """
@@ -268,9 +332,8 @@ def find_closest_to_network(point, points_by_network):
     return closest_point.geom, closest_point.network
 
 
-def a_star_search(start, end, points_by_network, networks, search_radius_network, increase_radius_network, search_radius_other_networks):
+def a_star_search(start, end, spatial_graph:SpatialGraph, search_radius_network, increase_radius_network, search_radius_other_networks):
     """Perform A* Search."""
-    visited = []
     total_distance = 0  # Track total distance
     print('Start A* algorithm')
 
@@ -280,69 +343,62 @@ def a_star_search(start, end, points_by_network, networks, search_radius_network
     
     # Find the closest points in the network for start and end
     print('Finding closest points in the network...')
-    real_start, start_network = find_closest_to_network(start, points_by_network)
-    real_end, end_network = find_closest_to_network(end, points_by_network)
+    real_start, start_network, start_line, start_index = spatial_graph.find_closest_point_not_in_network(start)
+    print(start_line)
+    exit()
+    real_end, end_network, _, _ = spatial_graph.find_closest_point_not_in_network(end)
     print('Closest start points found:', start, real_start, 'Distance:', haversine_distance(start, real_start))
     print('Closest end points found:', end, real_end, 'Distance:', haversine_distance(end, real_end))
     
+    start_heuristic = haversine_distance(real_start, real_end)
     # Initialize the search
     g_cost = {real_start: 0}  # Cost from start to the current node
-    f_cost = {real_start: haversine_distance(real_start, real_end)}  # Total cost (g + h)
-    heapq.heappush(priority_queue, (f_cost[real_start], real_start, start_network))  # (priority, point, network)
+    heapq.heappush(priority_queue, (start_heuristic, Neighbour([real_start], start_network, start_line, start_index, 0, start_heuristic)))  # (priority, node)
     came_from = {}  # Track the path
     
     print('Starting search on network:', start_network)
     while priority_queue:
         # Get the point with the smallest f_cost
-        _, current_point, current_network = heapq.heappop(priority_queue)
-        current_point = current_point  # Ensure it's hashable
-        
-        if current_point in visited:
-            continue
-        visited.append(current_point)
+        _, neighbor = heapq.heappop(priority_queue)
+        print('Visiting point:', neighbor.get_last_point())
+        print(f'Current heuristic distance: {neighbor.heuristic_distance:.2f} current point: {neighbor.get_last_point()}')
+        neighbor : Neighbour = neighbor # type hinting
         
         # Check if we reached the goal
-        if haversine_distance(current_point, real_end) <= search_radius_network:
+        if haversine_distance(neighbor.get_last_point(), real_end) <= search_radius_network:
             print("Goal reached!")
-            path = reconstruct_path(came_from, current_point)
+            path = reconstruct_path(came_from, neighbor.get_last_point())
             path.extend([real_end, end])  # Append the final points
             total_distance = g_cost[real_end] + haversine_distance(real_end, end)
             return path, total_distance
         
         # Get candidates
-        candidates = get_adjacent_points_and_lines(
-            current_point,
-            real_end,
-            points_by_network,
-            networks,
-            current_network,
-            search_radius_network, increase_radius_network, search_radius_other_networks
-        )
+        candidates = spatial_graph.find_neighbours(neighbor, real_end)
+        prin
         
-        if candidates.empty:
-            print("No path found!")
-            return visited, total_distance
+        if not candidates:
+            # print("No path found!")
+            # Found a dead end, backtrack
+            continue
         
         # Process each candidate
-        for _, row in candidates.iterrows():
-            neighbor = row.geom
-            network = row.network
-            tentative_g_cost = g_cost[current_point] + haversine_distance(current_point, neighbor)
+        for new_neighbor in candidates:
+            new_neighbor : Neighbour = new_neighbor # type hinting
+            tentative_g_cost = new_neighbor.real_distance
             
             # If the neighbor is already evaluated with a lower cost, skip it
-            if neighbor in g_cost and tentative_g_cost >= g_cost[neighbor]:
+            if neighbor.get_last_point() in g_cost and tentative_g_cost >= g_cost[neighbor.get_last_point()]:
                 continue
             
             # Update path and costs
-            came_from[neighbor] = current_point
-            g_cost[neighbor] = tentative_g_cost
-            f_cost[neighbor] = tentative_g_cost + haversine_distance(neighbor, real_end)
+            came_from[new_neighbor.get_last_point()] = neighbor
+            g_cost[neighbor.get_last_point()] = new_neighbor.real_distance
             
             # Push to priority queue
-            heapq.heappush(priority_queue, (f_cost[neighbor], neighbor, network))
+            heapq.heappush(priority_queue, (new_neighbor.heuristic_distance, new_neighbor))
     
     print("No path found!")
-    return visited, total_distance
+    return None, total_distance
 
 
 def reconstruct_path(came_from, current_point):
@@ -377,9 +433,10 @@ if __name__ == "__main__":
     print("End point:", end_point)
     # ensure_results_table_exists(engine)
     # Run Best-First Search
+    spatial_graph = SpatialGraph(networks, points_by_network)
     path, total_distance = a_star_search(
         start_point.geom, end_point.geom,
-        points_by_network, networks,
+        spatial_graph,
         search_radius_network, increase_radius_network, search_radius_other_networks
     )
     path_wkt = create_multilinestring_from_points(path)

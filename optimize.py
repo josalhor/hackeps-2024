@@ -175,9 +175,10 @@ end_point = final.sample(1, random_state=42).iloc[0]
 print(f"Start point ID: {start_point.id}, End point ID: {end_point.id}")
 
 # Parameters
-search_radius_network = 3000  # in meters
+search_radius_network = 1000  # in meters
 increase_radius_network = 1000  # in meters
-search_radius_other_networks = 1000  # in meters
+search_radius_other_networks = 200  # in meters
+max_search_radius = 5000  # in meters
 
 # This works for points in format 4326 not 25830
 # def haversine_distance(point1, point2):
@@ -201,13 +202,13 @@ def get_adjacent_points_and_lines(point, endpoint, points_by_network, red_lines,
     # nearby_points = red_points[red_points.distance(point) <= radius]
     points_current_network = pd.DataFrame()
     heuristic_current_point = haversine_distance(point, endpoint)
-    while points_current_network.empty:
+    while points_current_network.empty and search_radius_network <= max_search_radius:
         points_current_network = points_by_network[current_red][points_by_network[current_red].distance(point) <= search_radius_network].copy()
         search_radius_network += increase_radius_network
+        points_current_network = points_current_network[points_current_network['geom'].apply(lambda pt: haversine_distance(pt, endpoint) < heuristic_current_point)]
     points_current_network['network'] = current_red
 
     # Filter those with a heuristic less than the current point
-    points_current_network = points_current_network[points_current_network['geom'].apply(lambda pt: haversine_distance(pt, endpoint) < heuristic_current_point)]
 
     all_points = points_current_network
 

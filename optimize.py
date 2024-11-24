@@ -44,40 +44,6 @@ def create_multilinestring_from_points(visited_points):
     # Return WKT representation
     return multilinestring.wkt
 
-# def ensure_results_table_exists(engine):
-#     """
-#     Ensures that the 'results' table exists in the database.
-#     If it does not exist, creates the table with the required schema.
-#     """
-#     table_exists_query = text("""
-#     SELECT EXISTS (
-#         SELECT 1
-#         FROM information_schema.tables
-#         WHERE table_schema = 'eps' AND table_name = 'results'
-#     );
-#     """)
-    
-#     with engine.connect() as conn:
-#         result = conn.execute(table_exists_query).scalar()
-#         if not result:
-#             create_table_query = text("""
-#             CREATE TABLE eps.results (
-#                 id SERIAL PRIMARY KEY,
-#                 start_point GEOMETRY(Point, 25830) NOT NULL,
-#                 end_point GEOMETRY(Point, 25830) NOT NULL,
-#                 path GEOMETRY(MultiLineString, 25830) NOT NULL,
-#                 distance FLOAT NOT NULL,
-#                 UNIQUE (start_point, end_point)
-#             );
-#             """)
-#             conn.execute(create_table_query)
-#             print("Table 'eps.results' created.")
-#             result = conn.execute(table_exists_query).scalar()
-#             assert result, f"Table 'eps.results' was not created successfully."
-#         else:
-#             print("Table 'eps.results' already exists.")
-
-
 
 def insert_or_update_result(engine, start_point_wkt, end_point_wkt, path_wkt, distance):
     """
@@ -611,7 +577,33 @@ if __name__ == "__main__":
         SEARCH_RADIUS, INCREASE_RADIUS, SEARCH_OTHER_NETWORKS
     )
     path_wkt = create_multilinestring_from_points(path)
+    ############################
+    # SAVE THE RESULTS
+    ############################
+    # Option 1- Save the results to the database, make sure to run:
+    # CREATE TABLE eps.results (
+#                 id SERIAL PRIMARY KEY,
+#                 start_point GEOMETRY(Point, 25830) NOT NULL,
+#                 end_point GEOMETRY(Point, 25830) NOT NULL,
+#                 path GEOMETRY(MultiLineString, 25830) NOT NULL,
+#                 distance FLOAT NOT NULL,
+#                 UNIQUE (start_point, end_point)
+    # before running this line
     insert_or_update_result(engine, start_point.geom.wkt, end_point.geom.wkt, path_wkt, total_distance)
+    
+    # Option 2- Save the results to output.txt
+    # Save the results to output.txt
+    # with open("output.txt", "w") as f:
+    #     f.write("Visited Points:\n")
+    #     for i, point in enumerate(path):
+    #         f.write(f"{i + 1}: {point}\n")
+    #     f.write(f"Total Cost Distance: {total_distance:.2f} meters\n")
+    # Create a GeoDataFrame from the path and save it to a shapefile
+
+    # Option 3- Save the results to a shapefile
+    # path_gdf = gpd.GeoDataFrame(geometry=path)
+    # path_gdf.crs = "EPSG:25830"
+    # path_gdf.to_file("path.shp")
 
     # Print the results
     print("Visited Points:")

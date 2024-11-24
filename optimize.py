@@ -3,6 +3,7 @@ import pandas as pd
 import random
 from shapely.geometry import Point, MultiLineString, Point
 from shapely.ops import nearest_points
+from shapely import get_coordinates
 from sqlalchemy import create_engine
 from geopy.distance import geodesic
 from sqlalchemy import inspect
@@ -513,6 +514,78 @@ def print_reslts_table(engine):
             print("No results found.")
     exit()
 
+def get_coordinates_multiline(multiline):
+    """Get the coordinates of a multilinestring."""
+    return [
+        Point(coord)
+        for coords in multiline.geoms
+        for coord in get_coordinates(coords)
+    ]
+
+
+def fit_path_to_network(path, networks):
+    lines = []
+    complete_gds = pd.concat(networks.values())
+    complete_gds.reset_index(drop=True, inplace=True)
+    for point in path:
+        # Find closest line in the network
+        min_line_index = complete_gds.distance(point).idxmin()
+        # closest_line = complete_gds.geometry.loc[min_line_index]
+        lines.append(min_line_index)
+    same_line = []
+    for i in range(len(lines) - 1):
+        is_same = lines[i] == lines[i + 1]
+        same_line.append(is_same)
+    same_line.append(False)
+    new_path = []
+    # Now, we will create a new path by refining it
+    # We will start by fitting each point to the closest line
+    for i, point in enumerate(path):
+        line = complete_gds.geometry.loc[lines[i]]
+        points = get_coordinates_multiline(line)
+        closest_point = min(points, key=lambda p: p.distance(point))
+        new_path.append(closest_point)
+    path = new_path
+    # Nowe we will add intermediate points to the path
+    # When the path stays on the same line
+    interpolation_passes = 3
+    for _ in range(interpolation_passes):
+        new_path = []
+        new_same_line = []
+        new_lines = []
+        for i, point in enumerate(path):
+            line = complete_gds.geometry.loc[lines[i]]
+            # assert point in line
+            assert point.distance(line) < 1e-6, f"Point {point} is not on line {line} distance: {point.distance(line)}"
+            new_path.append(point)
+            new_same_line.append(same_line[i])
+            new_lines.append(lines[i])
+            if same_line[i]:
+                points_geometry = get_coordinates_multiline(line)
+                # index_current = points_geometry.index(point)
+                next_point = path[i + 1]
+                interpolated = Point((point.x + next_point.x) / 2, (point.y + next_point.y) / 2)
+                # Now we fit the interpolated point to the line
+                closest_point = min(points_geometry, key=lambda p: p.distance(interpolated))
+                if closest_point != point and closest_point != next_point:
+                    new_path.append(closest_point)
+                    new_same_line.append(True)
+                    new_lines.append(lines[i])
+                # index_next = points_geometry.index(next_point)
+                # Now we will add intermediate points between the current point and the next point
+                # if index_next < index_current:
+                #     # for j in range(index_current - 1, index_next, -1):
+                #     #     new_path.append(points_geometry[j])
+                #     pass
+                # else:
+                #     # for j in range(index_current + 1, index_next):
+                #     #     new_path.append(points_geometry[j])
+                #     pass
+        path = new_path
+        same_line = new_same_line
+        lines = new_lines
+
+    return new_path
 if __name__ == "__main__":
     # Load data
     print('Loading tables...')
@@ -561,8 +634,8 @@ if __name__ == "__main__":
     }
 
     # Select random start and end points
-    start_point = inicio.sample(1, random_state=45).iloc[0]
-    end_point = final.sample(1, random_state=44).iloc[0]
+    start_point = inicio.sample(1, random_state=42).iloc[0]
+    end_point = final.sample(1, random_state=42).iloc[0]
 
     print(f"Start point ID: {start_point.id}, End point ID: {end_point.id}")
 
@@ -576,6 +649,7 @@ if __name__ == "__main__":
         points_by_network, networks,
         SEARCH_RADIUS, INCREASE_RADIUS, SEARCH_OTHER_NETWORKS
     )
+    path = fit_path_to_network(path, networks)
     path_wkt = create_multilinestring_from_points(path)
     ############################
     # SAVE THE RESULTS

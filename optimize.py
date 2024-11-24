@@ -192,6 +192,11 @@ def haversine_distance(point1, point2):
     """Calculate the haversine distance (meters) between two points."""
     return point1.distance(point2)
 
+costs = {
+    "red1": 3,
+    "red2": 5,
+    "red3": 10
+}
 
 def get_adjacent_points_and_lines(point, endpoint, points_by_network, red_lines, current_red, search_radius_network, increase_radius_network, search_radius_other_networks):
     """
@@ -205,9 +210,10 @@ def get_adjacent_points_and_lines(point, endpoint, points_by_network, red_lines,
     points_current_network = pd.DataFrame()
     heuristic_current_point = haversine_distance(point, endpoint)
     while points_current_network.empty and search_radius_network <= max_search_radius:
-        points_current_network = points_by_network[current_red][points_by_network[current_red].distance(point) <= search_radius_network].copy()
+        points_radius = points_by_network[current_red][points_by_network[current_red].distance(point) <= search_radius_network].copy()
         search_radius_network += increase_radius_network
-        points_current_network = points_current_network[points_current_network['geom'].apply(lambda pt: haversine_distance(pt, endpoint) < heuristic_current_point)]
+        points_current_network = points_radius[points_radius['geom'].apply(lambda pt: haversine_distance(pt, endpoint) < heuristic_current_point)]
+    points_current_network = points_radius
     points_current_network['network'] = current_red
 
     # Filter those with a heuristic less than the current point
@@ -270,8 +276,6 @@ def find_closest_to_network(point, points_by_network):
 
 def a_star_search(start, end, points_by_network, networks, search_radius_network, increase_radius_network, search_radius_other_networks):
     """Perform A* Search."""
-    visited = []
-    total_distance = 0  # Track total distance
     print('Start A* algorithm')
 
     # Initialize priority queue
@@ -287,8 +291,7 @@ def a_star_search(start, end, points_by_network, networks, search_radius_network
     
     # Initialize the search
     g_cost = {real_start: 0}  # Cost from start to the current node
-    f_cost = {real_start: haversine_distance(real_start, real_end)}  # Total cost (g + h)
-    heapq.heappush(priority_queue, (f_cost[real_start], real_start, start_network))  # (priority, point, network)
+    heapq.heappush(priority_queue, (haversine_distance(real_start, real_end), real_start, start_network))  # (priority, point, network)
     came_from = {}  # Track the path
     
     print('Starting search on network:', start_network)
@@ -297,16 +300,12 @@ def a_star_search(start, end, points_by_network, networks, search_radius_network
         _, current_point, current_network = heapq.heappop(priority_queue)
         current_point = current_point  # Ensure it's hashable
         
-        if current_point in visited:
-            continue
-        visited.append(current_point)
-        
         # Check if we reached the goal
         if haversine_distance(current_point, real_end) <= search_radius_network:
             print("Goal reached!")
             path = reconstruct_path(came_from, current_point)
-            path.extend([real_end, end])  # Append the final points
-            total_distance = g_cost[real_end] + haversine_distance(real_end, end)
+            path = [start] + path + [real_end, end]
+            total_distance = g_cost[real_end] + haversine_distance(real_end, end) + haversine_distance(start, real_start)
             return path, total_distance
         
         # Get candidates
@@ -320,14 +319,16 @@ def a_star_search(start, end, points_by_network, networks, search_radius_network
         )
         
         if candidates.empty:
-            print("No path found!")
-            return visited, total_distance
+            # print("No path found!")
+            continue
+            return None, total_distance
         
         # Process each candidate
         for _, row in candidates.iterrows():
             neighbor = row.geom
             network = row.network
-            tentative_g_cost = g_cost[current_point] + haversine_distance(current_point, neighbor)
+            cost_multiplier = costs[network]
+            tentative_g_cost = g_cost[current_point] + haversine_distance(current_point, neighbor) * cost_multiplier
             
             # If the neighbor is already evaluated with a lower cost, skip it
             if neighbor in g_cost and tentative_g_cost >= g_cost[neighbor]:
@@ -336,13 +337,12 @@ def a_star_search(start, end, points_by_network, networks, search_radius_network
             # Update path and costs
             came_from[neighbor] = current_point
             g_cost[neighbor] = tentative_g_cost
-            f_cost[neighbor] = tentative_g_cost + haversine_distance(neighbor, real_end)
             
             # Push to priority queue
-            heapq.heappush(priority_queue, (f_cost[neighbor], neighbor, network))
+            heapq.heappush(priority_queue, (tentative_g_cost + haversine_distance(neighbor, real_end), neighbor, network))
     
     print("No path found!")
-    return visited, total_distance
+    return None, total_distance
 
 
 def reconstruct_path(came_from, current_point):
@@ -390,4 +390,4 @@ if __name__ == "__main__":
     for i, point in enumerate(path):
         print(f"{i + 1}: {point}")
 
-    print(f"Total Path Distance: {total_distance:.2f} meters")
+    print(f"Total Cost Distance: {total_distance:.2f} meters")

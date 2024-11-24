@@ -27,39 +27,6 @@ def load_table(table_name):
     query = f"SELECT * FROM {table_name}"
     return gpd.read_postgis(query, con=engine, geom_col="geom")
 
-# Load data
-print('Loading tables...')
-inicio = load_table("eps.inicio")
-final = load_table("eps.final")
-red1 = load_table("eps.red1")
-red2 = load_table("eps.red2")
-red3 = load_table("eps.red3")
-red1_puntos = load_table("eps.red1_puntos")
-red2_puntos = load_table("eps.red2_puntos")
-red3_puntos = load_table("eps.red3_puntos")
-
-# Inicio and final points are in a different format
-# than the red points
-# Inicio points are in EPSG:4326, while network points are in EPSG:25830
-# We need to convert the inicio and final points to EPSG:25830
-
-def convert_to_25830(gdf):
-    """Convert a GeoDataFrame to EPSG:25830."""
-    return gdf.to_crs(epsg=25830)
-
-# Convert inicio and final points to EPSG:25830
-inicio = convert_to_25830(inicio)
-final = convert_to_25830(final)
-
-# For some reason, red3_puntos is made of 
-# MultiPoint geometries instead of Point geometries
-# But the multi-point geometries are just single points
-# So we can convert them to Point geometries
-
-def convert_multipoint_to_point(mp):
-    """Convert a MultiPoint to a Point."""
-    return mp.geoms[0]
-red3_puntos["geom"] = red3_puntos["geom"].apply(convert_multipoint_to_point)
 
 def create_multilinestring_from_points(visited_points):
     """
@@ -150,67 +117,29 @@ def insert_or_update_result(engine, start_point_wkt, end_point_wkt, path_wkt, di
             }).scalar()
             print(f"Result ID: {result}")
 
-
-# Combine all red points into one GeoDataFrame
-# all_points = gpd.GeoDataFrame(
-#     pd.concat([red1_puntos, red2_puntos, red3_puntos], ignore_index=True),
-#     crs=red1_puntos.crs,
-#     geometry="geom"
-# )
-points_by_network = {
-    "red1": red1_puntos,
-    "red2": red2_puntos,
-    "red3": red3_puntos
-}
-
-# Organize the networks into a dictionary
-networks = {
-    "red1": red1,
-    "red2": red2,
-    "red3": red3
-}
-
-# Select random start and end points
-start_point = inicio.sample(1, random_state=45).iloc[0]
-end_point = final.sample(1, random_state=44).iloc[0]
-
-print(f"Start point ID: {start_point.id}, End point ID: {end_point.id}")
-
 # Parameters
-search_radius_network = 1000  # in meters
-increase_radius_network = 1000  # in meters
-search_radius_other_networks = 500  # in meters
-max_search_radius = 7000  # in meters
-final_radius = 2000  # in meters
+SEARCH_RADIUS = 1000  # in meters
+INCREASE_RADIUS = 1000  # in meters
+SEARCH_OTHER_NETWORKS = 500  # in meters
+MAX_SEARCH_RADIUS = 7000  # in meters
+FINAL_RADIUS = 2000  # in meters
 
-# This works for points in format 4326 not 25830
-# def haversine_distance(point1, point2):
-#     """Calculate the haversine distance (meters) between two points."""
-#     return geodesic((point1.y, point1.x), (point2.y, point2.x)).meters
+COSTS = {
+    "red1": 3,
+    "red2": 5,
+    "red3": 10
+}
 
 # This works for points in format 25830
 def haversine_distance(point1, point2):
     """Calculate the haversine distance (meters) between two points."""
     return point1.distance(point2)
 
-costs = {
-    "red1": 3,
-    "red2": 5,
-    "red3": 10
-}
 
 def get_adjacent_points_and_lines(point, endpoint, points_by_network, red_lines, current_red, search_radius_network, increase_radius_network, search_radius_other_networks):
-    """
-    Find all candidates within the search radius, including:
-    - Points from the same or other networks within the radius.
-    - Adjacent points in the same network.
-    """
-    # print(f"Finding adjacent points for {point}")
-    # Find points in other networks within the radius
-    # nearby_points = red_points[red_points.distance(point) <= radius]
     points_current_network = pd.DataFrame()
     heuristic_current_point = haversine_distance(point, endpoint)
-    while points_current_network.empty and search_radius_network <= max_search_radius:
+    while points_current_network.empty and search_radius_network <= MAX_SEARCH_RADIUS:
         points_radius = points_by_network[current_red][points_by_network[current_red].distance(point) <= search_radius_network].copy()
         search_radius_network += increase_radius_network
         points_current_network = points_radius[points_radius['geom'].apply(lambda pt: haversine_distance(pt, endpoint) < heuristic_current_point)]
@@ -223,7 +152,7 @@ def get_adjacent_points_and_lines(point, endpoint, points_by_network, red_lines,
 
     # Find points in other networks within the radius
     radius = search_radius_other_networks
-    while all_points.empty and radius <= max_search_radius:
+    while all_points.empty and radius <= MAX_SEARCH_RADIUS:
         for network_name, network in points_by_network.items():
             if network_name != current_red:
                 nearby_points = network[network.distance(point) <= radius].copy()
@@ -232,26 +161,6 @@ def get_adjacent_points_and_lines(point, endpoint, points_by_network, red_lines,
         radius += increase_radius_network
     
     return all_points
-    # Find adjacent points along the same red
-    # adjacent_points = []
-    # for line in red_lines[current_red].itertuples():
-    #     if line.geom.distance(point) <= radius:
-    #         # Extract points (start and end) of the line segment
-    #         coords = list(line.geom.coords)
-    #         for i, coord in enumerate(coords):
-    #             candidate = Point(coord)
-    #             if point.distance(candidate) <= radius:
-    #                 adjacent_points.append(candidate)
-    #             # Add next or previous points in the sequence
-    #             if i > 0:
-    #                 adjacent_points.append(Point(coords[i - 1]))
-    #             if i < len(coords) - 1:
-    #                 adjacent_points.append(Point(coords[i + 1]))
-    
-    # Combine and return unique points
-    # return gpd.GeoDataFrame(
-    #     geometry=list(set(nearby_points["geom"].tolist() + adjacent_points))
-    # )
 
 def get_adjacent_points(point, red_points, radius):
     """ Find all candidates within the search radius. """
@@ -304,7 +213,7 @@ def a_star_search(start, end, points_by_network, networks, search_radius_network
         current_point = current_point  # Ensure it's hashable
         
         # Check if we reached the goal
-        if haversine_distance(current_point, real_end) <= final_radius:
+        if haversine_distance(current_point, real_end) <= FINAL_RADIUS:
             print("Goal reached!")
             path = reconstruct_path(came_from, current_point)
             path = [start] + path + [real_end, end]
@@ -330,7 +239,7 @@ def a_star_search(start, end, points_by_network, networks, search_radius_network
         for _, row in candidates.iterrows():
             neighbor = row.geom
             network = row.network
-            cost_multiplier = costs[network]
+            cost_multiplier = COSTS[network]
             tentative_g_cost = g_cost[current_point] + haversine_distance(current_point, neighbor) * cost_multiplier
             
             # If the neighbor is already evaluated with a lower cost, skip it
@@ -342,7 +251,7 @@ def a_star_search(start, end, points_by_network, networks, search_radius_network
             g_cost[neighbor] = tentative_g_cost
             
             # Push to priority queue
-            min_multiplier = min(costs.values())
+            min_multiplier = min(COSTS.values())
             heapq.heappush(priority_queue, (tentative_g_cost + haversine_distance(neighbor, real_end) * min_multiplier, neighbor, network))
     
     print("No path found!")
@@ -367,7 +276,7 @@ def best_first_search(start, end, points_by_network, networks, search_radius_net
     # Initialize the search
     heapq.heappush(priority_queue, (haversine_distance(real_start, real_end), real_start, start_network, 0))  # (heuristic, point, network, cost)
     came_from = {}  # Track the path
-    min_multiplier = min(costs.values())
+    min_multiplier = min(COSTS.values())
     
     print('Starting search on network:', start_network)
     while priority_queue:
@@ -377,10 +286,10 @@ def best_first_search(start, end, points_by_network, networks, search_radius_net
             continue
         visited.add(current_point)
         print(f"Current Heuristic: {current_heuristic}")
-        cost_multiplier = costs[current_network]
+        cost_multiplier = COSTS[current_network]
         
         # Check if we reached the goal
-        if haversine_distance(current_point, real_end) <= final_radius:
+        if haversine_distance(current_point, real_end) <= FINAL_RADIUS:
             print("Goal reached!")
             path = reconstruct_path(came_from, current_point)
             path = [start] + path + [real_end, end]
@@ -436,7 +345,7 @@ def greedy_search(start, end, points_by_network, networks, search_radius_network
     print('Starting greedy search...')
     while True:
         # Check if we reached the goal
-        if haversine_distance(current_point, real_end) <= final_radius:
+        if haversine_distance(current_point, real_end) <= FINAL_RADIUS:
             print("Goal reached!")
             path += reconstruct_path(came_from, current_point) + [real_end, end]
             total_distance = sum(
@@ -508,7 +417,7 @@ def hybrid_search(start, end, points_by_network, networks, search_radius_network
     print('Starting hybrid search...')
     while True:
         # Check if we reached the goal
-        if haversine_distance(current_point, real_end) <= final_radius:
+        if haversine_distance(current_point, real_end) <= FINAL_RADIUS:
             print("Goal reached!")
             path += reconstruct_path(came_from, current_point) + [real_end, end]
             total_distance = sum(
@@ -639,6 +548,58 @@ def print_reslts_table(engine):
     exit()
 
 if __name__ == "__main__":
+    # Load data
+    print('Loading tables...')
+    inicio = load_table("eps.inicio")
+    final = load_table("eps.final")
+    red1 = load_table("eps.red1")
+    red2 = load_table("eps.red2")
+    red3 = load_table("eps.red3")
+    red1_puntos = load_table("eps.red1_puntos")
+    red2_puntos = load_table("eps.red2_puntos")
+    red3_puntos = load_table("eps.red3_puntos")
+
+    # Inicio and final points are in a different format
+    # than the red points
+    # Inicio points are in EPSG:4326, while network points are in EPSG:25830
+    # We need to convert the inicio and final points to EPSG:25830
+
+    def convert_to_25830(gdf):
+        """Convert a GeoDataFrame to EPSG:25830."""
+        return gdf.to_crs(epsg=25830)
+
+    # Convert inicio and final points to EPSG:25830
+    inicio = convert_to_25830(inicio)
+    final = convert_to_25830(final)
+
+    # For some reason, red3_puntos is made of 
+    # MultiPoint geometries instead of Point geometries
+    # But the multi-point geometries are just single points
+    # So we can convert them to Point geometries
+
+    def convert_multipoint_to_point(mp):
+        """Convert a MultiPoint to a Point."""
+        return mp.geoms[0]
+    red3_puntos["geom"] = red3_puntos["geom"].apply(convert_multipoint_to_point)
+    points_by_network = {
+        "red1": red1_puntos,
+        "red2": red2_puntos,
+        "red3": red3_puntos
+    }
+
+    # Organize the networks into a dictionary
+    networks = {
+        "red1": red1,
+        "red2": red2,
+        "red3": red3
+    }
+
+    # Select random start and end points
+    start_point = inicio.sample(1, random_state=45).iloc[0]
+    end_point = final.sample(1, random_state=44).iloc[0]
+
+    print(f"Start point ID: {start_point.id}, End point ID: {end_point.id}")
+
     # print_reslts_table(engine)
     print("Start point:", start_point)
     print("End point:", end_point)
@@ -647,7 +608,7 @@ if __name__ == "__main__":
     path, total_distance = best_first_search(
         start_point.geom, end_point.geom,
         points_by_network, networks,
-        search_radius_network, increase_radius_network, search_radius_other_networks
+        SEARCH_RADIUS, INCREASE_RADIUS, SEARCH_OTHER_NETWORKS
     )
     path_wkt = create_multilinestring_from_points(path)
     insert_or_update_result(engine, start_point.geom.wkt, end_point.geom.wkt, path_wkt, total_distance)

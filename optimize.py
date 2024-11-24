@@ -171,16 +171,17 @@ networks = {
 }
 
 # Select random start and end points
-start_point = inicio.sample(1, random_state=42).iloc[0]
-end_point = final.sample(1, random_state=42).iloc[0]
+start_point = inicio.sample(1, random_state=45).iloc[0]
+end_point = final.sample(1, random_state=44).iloc[0]
 
 print(f"Start point ID: {start_point.id}, End point ID: {end_point.id}")
 
 # Parameters
 search_radius_network = 1000  # in meters
 increase_radius_network = 1000  # in meters
-search_radius_other_networks = 200  # in meters
-max_search_radius = 5000  # in meters
+search_radius_other_networks = 500  # in meters
+max_search_radius = 7000  # in meters
+final_radius = 2000  # in meters
 
 # This works for points in format 4326 not 25830
 # def haversine_distance(point1, point2):
@@ -204,7 +205,7 @@ def get_adjacent_points_and_lines(point, endpoint, points_by_network, red_lines,
     - Points from the same or other networks within the radius.
     - Adjacent points in the same network.
     """
-    print(f"Finding adjacent points for {point}")
+    # print(f"Finding adjacent points for {point}")
     # Find points in other networks within the radius
     # nearby_points = red_points[red_points.distance(point) <= radius]
     points_current_network = pd.DataFrame()
@@ -221,13 +222,14 @@ def get_adjacent_points_and_lines(point, endpoint, points_by_network, red_lines,
     all_points = points_current_network
 
     # Find points in other networks within the radius
-    while all_points.empty:
+    radius = search_radius_other_networks
+    while all_points.empty and radius <= max_search_radius:
         for network_name, network in points_by_network.items():
             if network_name != current_red:
-                nearby_points = network[network.distance(point) <= search_radius_other_networks].copy()
+                nearby_points = network[network.distance(point) <= radius].copy()
                 nearby_points['network'] = network_name
                 all_points = pd.concat([all_points, nearby_points])
-        search_radius_other_networks += increase_radius_network
+        radius += increase_radius_network
     
     return all_points
     # Find adjacent points along the same red
@@ -297,11 +299,12 @@ def a_star_search(start, end, points_by_network, networks, search_radius_network
     print('Starting search on network:', start_network)
     while priority_queue:
         # Get the point with the smallest f_cost
-        _, current_point, current_network = heapq.heappop(priority_queue)
+        current_heuristic, current_point, current_network = heapq.heappop(priority_queue)
+        print(f"Current Heuristic: {current_heuristic}")
         current_point = current_point  # Ensure it's hashable
         
         # Check if we reached the goal
-        if haversine_distance(current_point, real_end) <= search_radius_network:
+        if haversine_distance(current_point, real_end) <= final_radius:
             print("Goal reached!")
             path = reconstruct_path(came_from, current_point)
             path = [start] + path + [real_end, end]
@@ -339,17 +342,281 @@ def a_star_search(start, end, points_by_network, networks, search_radius_network
             g_cost[neighbor] = tentative_g_cost
             
             # Push to priority queue
-            heapq.heappush(priority_queue, (tentative_g_cost + haversine_distance(neighbor, real_end), neighbor, network))
+            min_multiplier = min(costs.values())
+            heapq.heappush(priority_queue, (tentative_g_cost + haversine_distance(neighbor, real_end) * min_multiplier, neighbor, network))
     
     print("No path found!")
     return None, total_distance
+
+def best_first_search(start, end, points_by_network, networks, search_radius_network, increase_radius_network, search_radius_other_networks):
+    """Perform Best-First Search."""
+    print('Start Best-First Search algorithm')
+
+    # Initialize priority queue
+    priority_queue = []
+    visited = set()
+    heapq.heapify(priority_queue)
+    
+    # Find the closest points in the network for start and end
+    print('Finding closest points in the network...')
+    real_start, start_network = find_closest_to_network(start, points_by_network)
+    real_end, end_network = find_closest_to_network(end, points_by_network)
+    print('Closest start points found:', start, real_start, 'Distance:', haversine_distance(start, real_start))
+    print('Closest end points found:', end, real_end, 'Distance:', haversine_distance(end, real_end))
+    
+    # Initialize the search
+    heapq.heappush(priority_queue, (haversine_distance(real_start, real_end), real_start, start_network, 0))  # (heuristic, point, network, cost)
+    came_from = {}  # Track the path
+    min_multiplier = min(costs.values())
+    
+    print('Starting search on network:', start_network)
+    while priority_queue:
+        # Get the point with the smallest heuristic
+        current_heuristic, current_point, current_network, current_cost = heapq.heappop(priority_queue)
+        if current_point in visited:
+            continue
+        visited.add(current_point)
+        print(f"Current Heuristic: {current_heuristic}")
+        cost_multiplier = costs[current_network]
+        
+        # Check if we reached the goal
+        if haversine_distance(current_point, real_end) <= final_radius:
+            print("Goal reached!")
+            path = reconstruct_path(came_from, current_point)
+            path = [start] + path + [real_end, end]
+            total_distance = current_cost + haversine_distance(start, real_start) + haversine_distance(real_end, end) + haversine_distance(current_point, real_end) * cost_multiplier
+            return path, total_distance
+        
+        # Get candidates
+        candidates = get_adjacent_points_and_lines(
+            current_point,
+            real_end,
+            points_by_network,
+            networks,
+            current_network,
+            search_radius_network, increase_radius_network, search_radius_other_networks
+        )
+        
+        if candidates.empty:
+            continue
+        
+        # Process each candidate
+        for _, row in candidates.iterrows():
+            neighbor = row.geom
+            network = row.network
+            
+            # If the neighbor is already visited, skip it
+            if neighbor in came_from or neighbor == current_point or neighbor in visited:
+                continue
+            new_distance = current_cost + haversine_distance(current_point, neighbor) * cost_multiplier
+            
+            # Update path and push to priority queue
+            came_from[neighbor] = current_point
+            heapq.heappush(priority_queue, (haversine_distance(neighbor, real_end) * min_multiplier, neighbor, network, new_distance))
+    
+    print("No path found!")
+    return None, None
+
+def greedy_search(start, end, points_by_network, networks, search_radius_network, increase_radius_network, search_radius_other_networks):
+    """Perform Greedy Search."""
+    print('Start Greedy Search algorithm')
+
+    # Find the closest points in the network for start and end
+    print('Finding closest points in the network...')
+    real_start, start_network = find_closest_to_network(start, points_by_network)
+    real_end, end_network = find_closest_to_network(end, points_by_network)
+    print('Closest start points found:', start, real_start, 'Distance:', haversine_distance(start, real_start))
+    print('Closest end points found:', end, real_end, 'Distance:', haversine_distance(end, real_end))
+    
+    current_point = real_start
+    current_network = start_network
+    came_from = {}  # Track the path
+    path = [start]  # Initialize path
+
+    print('Starting greedy search...')
+    while True:
+        # Check if we reached the goal
+        if haversine_distance(current_point, real_end) <= final_radius:
+            print("Goal reached!")
+            path += reconstruct_path(came_from, current_point) + [real_end, end]
+            total_distance = sum(
+                haversine_distance(path[i], path[i+1]) for i in range(len(path) - 1)
+            )
+            return path, total_distance
+        
+        # Get candidates
+        candidates = get_adjacent_points_and_lines(
+            current_point,
+            real_end,
+            points_by_network,
+            networks,
+            current_network,
+            search_radius_network, increase_radius_network, search_radius_other_networks
+        )
+        
+        if candidates.empty:
+            print("No path found!")
+            return None, None
+
+        # Select the best candidate based on heuristic (closest to the end)
+        best_candidate = None
+        best_heuristic = float('inf')
+        
+        for _, row in candidates.iterrows():
+            neighbor = row.geom
+            network = row.network
+            heuristic = haversine_distance(neighbor, real_end)
+            if heuristic < best_heuristic:
+                best_candidate = (neighbor, network)
+                best_heuristic = heuristic
+
+        print(f"Best Heuristic: {best_heuristic}")
+        # Update path
+        if best_candidate is None:
+            print("No valid moves from the current point!")
+            return None, None
+        
+        next_point, next_network = best_candidate
+        came_from[next_point] = current_point
+        path.append(next_point)
+        current_point = next_point
+        current_network = next_network
+    
+    print("No path found!")
+    return None, None
+
+def hybrid_search(start, end, points_by_network, networks, search_radius_network, increase_radius_network, search_radius_other_networks):
+    """Perform Hybrid Search (Greedy + Best-First Search)."""
+    print('Start Hybrid Search algorithm')
+
+    # Find the closest points in the network for start and end
+    print('Finding closest points in the network...')
+    real_start, start_network = find_closest_to_network(start, points_by_network)
+    real_end, end_network = find_closest_to_network(end, points_by_network)
+    print('Closest start points found:', start, real_start, 'Distance:', haversine_distance(start, real_start))
+    print('Closest end points found:', end, real_end, 'Distance:', haversine_distance(end, real_end))
+    
+    current_point = real_start
+    current_network = start_network
+    path = [start]  # Initialize the path
+    came_from = {}  # Track the path
+    priority_queue = []  # Used for Best-First Search fallback
+
+    last_heuristic = haversine_distance(current_point, real_end)
+    greedy_mode = True  # Start in greedy mode
+
+    print('Starting hybrid search...')
+    while True:
+        # Check if we reached the goal
+        if haversine_distance(current_point, real_end) <= final_radius:
+            print("Goal reached!")
+            path += reconstruct_path(came_from, current_point) + [real_end, end]
+            total_distance = sum(
+                haversine_distance(path[i], path[i + 1]) for i in range(len(path) - 1)
+            )
+            return path, total_distance
+
+        # Get candidates
+        candidates = get_adjacent_points_and_lines(
+            current_point,
+            real_end,
+            points_by_network,
+            networks,
+            current_network,
+            search_radius_network, increase_radius_network, search_radius_other_networks
+        )
+        
+        if candidates.empty:
+            print("No valid moves from the current point!")
+            if not priority_queue:
+                print("No path found!")
+                return None, None
+            else:
+                # Switch fully to Best-First Search
+                greedy_mode = False
+
+        if greedy_mode:
+            # Greedy Mode: Pick the best candidate that decreases the heuristic
+            best_candidate = None
+            best_heuristic = float('inf')
+            
+            for _, row in candidates.iterrows():
+                neighbor = row.geom
+                network = row.network
+                heuristic = haversine_distance(neighbor, real_end)
+                if heuristic < best_heuristic:
+                    best_candidate = (neighbor, network)
+                    best_heuristic = heuristic
+            
+            # If no better candidate is found, switch to Best-First Search
+            if best_candidate is None or best_heuristic >= last_heuristic:
+                print("Greedy mode stuck. Switching to Best-First Search...")
+                greedy_mode = False
+                continue
+            
+            # Update path and move to the best candidate
+            next_point, next_network = best_candidate
+            came_from[next_point] = current_point
+            path.append(next_point)
+            current_point = next_point
+            current_network = next_network
+            last_heuristic = best_heuristic
+
+        else:
+            # Best-First Search Mode: Expand the search from the priority queue
+            if not priority_queue:
+                # Add initial point to priority queue if it's empty
+                heapq.heappush(priority_queue, (haversine_distance(current_point, real_end), current_point, current_network))
+            
+            # Process the queue
+            current_heuristic, current_point, current_network = heapq.heappop(priority_queue)
+
+            # Get candidates
+            candidates = get_adjacent_points_and_lines(
+                current_point,
+                real_end,
+                points_by_network,
+                networks,
+                current_network,
+                search_radius_network, increase_radius_network, search_radius_other_networks
+            )
+            
+            for _, row in candidates.iterrows():
+                neighbor = row.geom
+                network = row.network
+                heuristic = haversine_distance(neighbor, real_end)
+                
+                # Avoid revisiting
+                if neighbor in came_from:
+                    continue
+                
+                # Update path and add to queue
+                came_from[neighbor] = current_point
+                heapq.heappush(priority_queue, (heuristic, neighbor, network))
+            
+            # Switch back to greedy mode if there's a promising candidate
+            if candidates.empty or all(haversine_distance(row.geom, real_end) >= last_heuristic for _, row in candidates.iterrows()):
+                continue
+            else:
+                print("Switching back to Greedy mode...")
+                greedy_mode = True
+    
+    print("No path found!")
+    return None, None
 
 
 def reconstruct_path(came_from, current_point):
     """Reconstruct the path from came_from mapping."""
     path = [current_point]
+    visited = set()
     while current_point in came_from:
         current_point = came_from[current_point]
+        if current_point in visited:
+            print("Cycle detected!")
+            index = path.index(current_point)
+            print("Index repeated:", index, 'Current length:', len(path))
+            exit()
+        visited.add(current_point)
         path.append(current_point)
     path.reverse()
     return path
@@ -377,7 +644,7 @@ if __name__ == "__main__":
     print("End point:", end_point)
     # ensure_results_table_exists(engine)
     # Run Best-First Search
-    path, total_distance = a_star_search(
+    path, total_distance = best_first_search(
         start_point.geom, end_point.geom,
         points_by_network, networks,
         search_radius_network, increase_radius_network, search_radius_other_networks

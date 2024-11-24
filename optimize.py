@@ -243,6 +243,7 @@ def best_first_search(start, end, points_by_network, networks, search_radius_net
     # Initialize the search
     heapq.heappush(priority_queue, (haversine_distance(real_start, real_end), real_start, start_network, 0))  # (heuristic, point, network, cost)
     came_from = {}  # Track the path
+    point_to_network = {}
     min_multiplier = min(COSTS.values())
     
     print('Starting search on network:', start_network)
@@ -260,8 +261,9 @@ def best_first_search(start, end, points_by_network, networks, search_radius_net
             print("Goal reached!")
             path = reconstruct_path(came_from, current_point)
             path = [start] + path + [real_end, end]
+            network_path = [point_to_network.get(point, None) for point in path]
             total_distance = current_cost + haversine_distance(start, real_start) + haversine_distance(real_end, end) + haversine_distance(current_point, real_end) * cost_multiplier
-            return path, total_distance
+            return path, total_distance, network_path
         
         # Get candidates
         candidates = get_adjacent_points_and_lines(
@@ -288,6 +290,7 @@ def best_first_search(start, end, points_by_network, networks, search_radius_net
             
             # Update path and push to priority queue
             came_from[neighbor] = current_point
+            point_to_network[neighbor] = network
             heapq.heappush(priority_queue, (haversine_distance(neighbor, real_end) * min_multiplier, neighbor, network, new_distance))
     
     print("No path found!")
@@ -523,7 +526,7 @@ def get_coordinates_multiline(multiline):
     ]
 
 
-def fit_path_to_network(path, networks):
+def fit_path_to_network(path, networks, network_path):
     lines = []
     complete_gds = pd.concat(networks.values())
     complete_gds.reset_index(drop=True, inplace=True)
@@ -532,6 +535,27 @@ def fit_path_to_network(path, networks):
         min_line_index = complete_gds.distance(point).idxmin()
         # closest_line = complete_gds.geometry.loc[min_line_index]
         lines.append(min_line_index)
+    skipable_rounds = 3
+    for _ in range(skipable_rounds):
+        skipable = []
+        for i in range(len(lines)):
+            if i == 0 or i == len(lines) - 1:
+                skipable.append(False)
+                continue
+            is_skipable = lines[i - 1] == lines[i + 1] and lines[i] != lines[i - 1]
+            skipable.append(is_skipable)
+        new_path = []
+        new_lines = []
+        new_network_path = []
+        for i, point in enumerate(path):
+            if skipable[i]:
+                continue
+            new_path.append(point)
+            new_lines.append(lines[i])
+            new_network_path.append(network_path[i])
+        path = new_path
+        lines = new_lines
+        network_path = new_network_path
     same_line = []
     for i in range(len(lines) - 1):
         is_same = lines[i] == lines[i + 1]
@@ -553,6 +577,7 @@ def fit_path_to_network(path, networks):
         new_path = []
         new_same_line = []
         new_lines = []
+        new_network_path = []
         for i, point in enumerate(path):
             line = complete_gds.geometry.loc[lines[i]]
             # assert point in line
@@ -560,6 +585,7 @@ def fit_path_to_network(path, networks):
             new_path.append(point)
             new_same_line.append(same_line[i])
             new_lines.append(lines[i])
+            new_network_path.append(network_path[i])
             if same_line[i]:
                 points_geometry = get_coordinates_multiline(line)
                 # index_current = points_geometry.index(point)
@@ -571,21 +597,17 @@ def fit_path_to_network(path, networks):
                     new_path.append(closest_point)
                     new_same_line.append(True)
                     new_lines.append(lines[i])
-                # index_next = points_geometry.index(next_point)
-                # Now we will add intermediate points between the current point and the next point
-                # if index_next < index_current:
-                #     # for j in range(index_current - 1, index_next, -1):
-                #     #     new_path.append(points_geometry[j])
-                #     pass
-                # else:
-                #     # for j in range(index_current + 1, index_next):
-                #     #     new_path.append(points_geometry[j])
-                #     pass
+                    new_network_path.append(network_path[i])
         path = new_path
         same_line = new_same_line
         lines = new_lines
-
-    return new_path
+        network_path = new_network_path
+    total_distance = 0
+    for i in range(len(path) - 1):
+        distance_next_point = path[i].distance(path[i + 1])
+        cost_multiplier = COSTS.get(network_path[i], 1)
+        total_distance += distance_next_point * cost_multiplier
+    return new_path, total_distance
 if __name__ == "__main__":
     # Load data
     print('Loading tables...')
@@ -644,12 +666,12 @@ if __name__ == "__main__":
     print("End point:", end_point)
     # ensure_results_table_exists(engine)
     # Run Best-First Search
-    path, total_distance = best_first_search(
+    path, total_distance, network_path = best_first_search(
         start_point.geom, end_point.geom,
         points_by_network, networks,
         SEARCH_RADIUS, INCREASE_RADIUS, SEARCH_OTHER_NETWORKS
     )
-    path = fit_path_to_network(path, networks)
+    path, total_distance = fit_path_to_network(path, networks, network_path)
     path_wkt = create_multilinestring_from_points(path)
     ############################
     # SAVE THE RESULTS

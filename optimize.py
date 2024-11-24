@@ -90,6 +90,7 @@ INCREASE_RADIUS = 1000  # in meters
 SEARCH_OTHER_NETWORKS = 500  # in meters
 MAX_SEARCH_RADIUS = 7000  # in meters
 FINAL_RADIUS = 2000  # in meters
+POST_PROCESSING = True
 
 COSTS = {
     "red1": 3,
@@ -671,7 +672,8 @@ if __name__ == "__main__":
         points_by_network, networks,
         SEARCH_RADIUS, INCREASE_RADIUS, SEARCH_OTHER_NETWORKS
     )
-    path, total_distance = fit_path_to_network(path, networks, network_path)
+    if POST_PROCESSING:
+        path, total_distance = fit_path_to_network(path, networks, network_path)
     path_wkt = create_multilinestring_from_points(path)
     ############################
     # SAVE THE RESULTS
